@@ -1,64 +1,48 @@
-/* global chrome */
-/* global Uint8Array */
-
-function fechImageDataUri(uri, callback) {
-	fetchImage(uri, function() {
-		var contentType = this.getResponseHeader("Content-Type");
-		var unicode = toUnicodeString(this.response);
-		var base64 = encodeBase64(unicode);
-		var dataUri = "data:" + contentType + ";base64," + base64;
-		callback(dataUri);
-	});
-}
-
-function fetchImage(uri, callback) {
-	var xhr = new XMLHttpRequest();
-	xhr.open("GET", uri, true);
-	xhr.responseType = "arraybuffer";
-	xhr.onload = callback;
-	xhr.send();
-}
-
-function toUnicodeString(arrayBuffer) {
-	var bytes = new Uint8Array(arrayBuffer);
-	var binaryString = "";
-	for(var i = 0; i < bytes.byteLength; i++) {
-		binaryString += String.fromCharCode(bytes[i]);
+async function fetchImageDataUri(uri) {
+	const response = await fetch(uri);
+	const arrayBuffer = await response.arrayBuffer();
+	const contentType = response.headers.get("Content-Type");
+	const bytes = new Uint8Array(arrayBuffer);
+	const chunks = [];
+	for (let i = 0; i < bytes.byteLength; i += 8192) {
+		chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
 	}
-	return binaryString;
+	return "data:" + contentType + ";base64," + btoa(chunks.join(""));
 }
 
-function encodeBase64(string) {
-	return window.btoa(string);
-}
-
-function onMessage(message, sender, callback) {
-	if(message.action == "plantuml") {
-		fechImageDataUri(message.url, callback);
+function isAllowedUrl(url) {
+	try {
+		const parsed = new URL(url);
+		return parsed.protocol === "http:" || parsed.protocol === "https:";
+	} catch {
+		return false;
 	}
-	return true;
 }
 
-chrome.runtime.onMessage.addListener(onMessage);
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+	if (message.action === "plantuml" && isAllowedUrl(message.url)) {
+		fetchImageDataUri(message.url).then(sendResponse);
+		return true; // keep message channel open for async response
+	}
+});
 
-var matches = new RegExp(
+const matches = new RegExp(
 	"^" + chrome.runtime.getManifest()
-		.content_scripts[0]["matches"]
+		.content_scripts[0].matches
 		.join("|^")
 		.replace(/\//g, "\\/")
 		.replace(/\./g, "\\.")
 		.replace(/\*/g, ".+"));
 
-chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
-	if (changeInfo.status === "complete") {
-		if (tab.url.match(matches)) {
-			chrome.tabs.executeScript(tab.id, {
-				file: "rawdeflate.js"
-			}, function() {
-				chrome.tabs.executeScript(tab.id, {
-					file: "content-script.js"
-				}, chrome.runtime.lastError);
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+	if (changeInfo.status === "complete" && tab.url?.match(matches)) {
+		try {
+			await chrome.scripting.executeScript({
+				target: { tabId },
+				files: ["pako_deflate.min.js", "content-script.js"]
 			});
+		} catch {
+			// Ignore errors for restricted pages
 		}
 	}
 });
